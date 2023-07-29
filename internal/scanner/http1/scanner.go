@@ -99,14 +99,12 @@ headerKey:
 
 			key = append(s.headerKeyBuffer, data[:pos]...)
 		}
-
-		data = trimSuffixSpaces(data[pos+1:])
-
-		switch {
-		case bytes.EqualFold(key, hostKey):
+		
+		switch data = trimSuffixSpaces(data[pos+1:]); {
+		case equalfold(key, hostKey):
 			s.state = eHostValue
 			goto hostValue
-		case bytes.EqualFold(key, contentLengthKey):
+		case equalfold(key, contentLengthKey):
 			s.state = eContentLengthValue
 			goto contentLengthValue
 		default:
@@ -227,4 +225,18 @@ func trimSuffixSpaces(b []byte) []byte {
 	}
 
 	return b[:0]
+}
+
+func equalfold(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i]|0x20 != b[i] {
+			return false
+		}
+	}
+
+	return true
 }
