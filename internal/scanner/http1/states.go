@@ -10,5 +10,4 @@ const (
 	eContentLengthValue
 	eContentLengthValueCR
 	eOtherHeaderValue
-	ePostHeaderValue
 )

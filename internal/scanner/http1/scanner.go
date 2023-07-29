@@ -45,8 +45,8 @@ func (s *Scanner) Scan(data []byte) (report scanner.Report, done bool, rest []by
 		goto contentLengthValueCR
 	case eOtherHeaderValue:
 		goto otherHeaderValue
-	case ePostHeaderValue:
-		goto postHeaderValue
+	default:
+		panic("BUG: unknown scanner state")
 	}
 
 requestLine:
@@ -57,6 +57,8 @@ requestLine:
 
 	data = data[pos+1:]
 	s.state = eHeaderKey
+	// no goto, as headerKey is anyway just below. Just let it fall through without any extra
+	// instructions
 
 headerKey:
 	if len(data) == 0 {
@@ -69,14 +71,11 @@ headerKey:
 		s.state = eHeaderKeyCR
 		goto headerKeyCR
 	case '\n':
-		s.state = eRequestLine
-
-		return scanner.Report{
-			Receiver:      uf.B2S(s.hostValueBuffer),
-			ContentLength: s.contentLength,
-			IsChunked:     false,
-		}, true, data[1:], nil
+		data = data[1:]
+		goto requestCompleted
 	}
+
+	s.headerKeyBuffer = s.headerKeyBuffer[:0]
 
 	pos = bytes.IndexByte(data, ':')
 	if pos == -1 {
@@ -89,19 +88,31 @@ headerKey:
 		return report, false, data[:0], nil
 	}
 
-	s.headerKeyBuffer = append(s.headerKeyBuffer, data[:pos]...)
-	data = trimSuffixSpaces(data[pos+1:])
+	{
+		var key []byte
+		if len(s.headerKeyBuffer) == 0 {
+			key = data[:pos]
+		} else {
+			if len(s.headerKeyBuffer)+pos > cap(s.headerKeyBuffer) {
+				return report, true, nil, errors.New("header key is too long")
+			}
 
-	switch {
-	case bytes.EqualFold(s.headerKeyBuffer, hostKey):
-		s.state = eHostValue
-		goto hostValue
-	case bytes.EqualFold(s.headerKeyBuffer, contentLengthKey):
-		s.state = eContentLengthValue
-		goto contentLengthValue
-	default:
-		s.state = eOtherHeaderValue
-		goto otherHeaderValue
+			key = append(s.headerKeyBuffer, data[:pos]...)
+		}
+
+		data = trimSuffixSpaces(data[pos+1:])
+
+		switch {
+		case bytes.EqualFold(key, hostKey):
+			s.state = eHostValue
+			goto hostValue
+		case bytes.EqualFold(key, contentLengthKey):
+			s.state = eContentLengthValue
+			goto contentLengthValue
+		default:
+			s.state = eOtherHeaderValue
+			goto otherHeaderValue
+		}
 	}
 
 headerKeyCR:
@@ -113,13 +124,8 @@ headerKeyCR:
 		return report, true, nil, errors.New("incomplete CRLF sequence")
 	}
 
-	s.state = eRequestLine
-
-	return scanner.Report{
-		Receiver:      uf.B2S(s.hostValueBuffer),
-		ContentLength: s.contentLength,
-		IsChunked:     false,
-	}, true, data[1:], nil
+	data = data[1:]
+	goto requestCompleted
 
 otherHeaderValue:
 	pos = bytes.IndexByte(data, '\n')
@@ -128,8 +134,8 @@ otherHeaderValue:
 	}
 
 	data = data[pos+1:]
-	s.state = ePostHeaderValue
-	goto postHeaderValue
+	s.state = eHeaderKey
+	goto headerKey
 
 hostValue:
 	pos = bytes.IndexByte(data, '\n')
@@ -155,8 +161,8 @@ hostValue:
 
 		s.hostValueBuffer = append(s.hostValueBuffer, value...)
 		data = data[pos+1:]
-		s.state = ePostHeaderValue
-		goto postHeaderValue
+		s.state = eHeaderKey
+		goto headerKey
 	}
 
 contentLengthValue:
@@ -180,8 +186,8 @@ contentLengthValue:
 		goto contentLengthValueCR
 	case '\n':
 		data = data[1:]
-		s.state = ePostHeaderValue
-		goto postHeaderValue
+		s.state = eHeaderKey
+		goto headerKey
 	default:
 		return report, true, nil, errors.New("bad content-length value")
 	}
@@ -196,13 +202,21 @@ contentLengthValueCR:
 	}
 
 	data = data[1:]
-	s.state = ePostHeaderValue
-	goto postHeaderValue
-
-postHeaderValue:
-	s.headerKeyBuffer = s.headerKeyBuffer[:0]
 	s.state = eHeaderKey
 	goto headerKey
+
+requestCompleted:
+	report = scanner.Report{
+		Receiver:      uf.B2S(s.hostValueBuffer),
+		ContentLength: s.contentLength,
+		IsChunked:     false,
+	}
+	s.hostValueBuffer = s.hostValueBuffer[:0]
+	s.isChunked = false
+	s.contentLength = 0
+	s.state = eRequestLine
+
+	return report, true, data, nil
 }
 
 func trimSuffixSpaces(b []byte) []byte {

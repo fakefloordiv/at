@@ -1,9 +1,7 @@
 package http1
 
 import (
-	"fmt"
 	"github.com/stretchr/testify/require"
-	"strconv"
 	"testing"
 )
 
@@ -42,9 +40,5 @@ func TestScanner(t *testing.T) {
 		require.Equal(t, "www.google.com", report.Receiver)
 		require.Equal(t, 13, report.ContentLength)
 		require.False(t, report.IsChunked)
-	})
-
-	t.Run("lol", func(t *testing.T) {
-		fmt.Println(strconv.Quote(string(generateRequest(5, "google.com", 13))))
 	})
 }
