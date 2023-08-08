@@ -7,7 +7,7 @@ import (
 )
 
 func BenchmarkScanner(b *testing.B) {
-	b.Run("simple get", func(b *testing.B) {
+	b.Run("simple get no headers", func(b *testing.B) {
 		scan := NewScanner()
 		request := []byte("GET / HTTP/1.1\r\n\r\n")
 		b.SetBytes(int64(len(request)))
@@ -15,6 +15,8 @@ func BenchmarkScanner(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			_, _, _, _ = scan.Scan(request)
+			// as we put the whole request at a time, we can avoid checking if it's completed
+			scan.Release()
 		}
 	})
 
@@ -26,6 +28,7 @@ func BenchmarkScanner(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			_, _, _, _ = scan.Scan(request)
+			scan.Release()
 		}
 	})
 
@@ -37,17 +40,19 @@ func BenchmarkScanner(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			_, _, _, _ = scan.Scan(request)
+			scan.Release()
 		}
 	})
 
 	b.Run("get with 50 headers", func(b *testing.B) {
 		scan := NewScanner()
-		request := generateRequest(10, "www.google.com", 13)
+		request := generateRequest(50, "www.google.com", 13)
 		b.SetBytes(int64(len(request)))
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
 			_, _, _, _ = scan.Scan(request)
+			scan.Release()
 		}
 	})
 }

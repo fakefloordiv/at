@@ -1,15 +1,17 @@
 package http1
 
 import (
-	"atmen/internal/scanner"
+	"at/internal/scan"
 	"bytes"
 	"errors"
 	"github.com/indigo-web/utils/uf"
 )
 
 var (
-	hostKey          = []byte("host")
-	contentLengthKey = []byte("content-length")
+	hostKey          = []byte("host:")
+	contentLengthKey = []byte("content-length:")
+	// this variable must hold the value of the LONGEST key, including a colon at the end
+	maxKeyLen = len(contentLengthKey)
 )
 
 type Scanner struct {
@@ -20,16 +22,18 @@ type Scanner struct {
 	state           parserState
 	headerKeyBuffer []byte
 	hostValueBuffer []byte
+	chunkedScanner  *chunkedBodyScanner
 }
 
 func NewScanner() *Scanner {
 	return &Scanner{
-		headerKeyBuffer: make([]byte, 0, 100),
+		headerKeyBuffer: make([]byte, 0, maxKeyLen),
 		hostValueBuffer: make([]byte, 0, 4096),
+		chunkedScanner:  newChunkedScanner(),
 	}
 }
 
-func (s *Scanner) Scan(data []byte) (report scanner.Report, done bool, rest []byte, err error) {
+func (s *Scanner) Scan(data []byte) (report scan.Report, done bool, rest []byte, err error) {
 	var pos int
 
 	switch s.state {
@@ -46,13 +50,13 @@ func (s *Scanner) Scan(data []byte) (report scanner.Report, done bool, rest []by
 	case eOtherHeaderValue:
 		goto otherHeaderValue
 	default:
-		panic("BUG: unknown scanner state")
+		panic("BUG: unknown scan state")
 	}
 
 requestLine:
 	pos = bytes.IndexByte(data, '\n')
 	if pos == -1 {
-		return report, false, data[:0], nil
+		return report, false, nil, nil
 	}
 
 	data = data[pos+1:]
@@ -62,7 +66,7 @@ requestLine:
 
 headerKey:
 	if len(data) == 0 {
-		return report, false, data, nil
+		return report, false, nil, nil
 	}
 
 	switch data[0] {
@@ -75,47 +79,33 @@ headerKey:
 		goto requestCompleted
 	}
 
-	s.headerKeyBuffer = s.headerKeyBuffer[:0]
+	s.headerKeyBuffer = append(s.headerKeyBuffer, data[:maxKeyLen-len(s.headerKeyBuffer)]...)
 
-	pos = bytes.IndexByte(data, ':')
-	if pos == -1 {
-		if len(s.headerKeyBuffer)+len(data) > cap(s.headerKeyBuffer) {
-			return report, true, nil, errors.New("header key is too long")
-		}
-
-		s.headerKeyBuffer = append(s.headerKeyBuffer, data...)
-
-		return report, false, data[:0], nil
-	}
-
-	{
-		var key []byte
-		if len(s.headerKeyBuffer) == 0 {
-			key = data[:pos]
-		} else {
-			if len(s.headerKeyBuffer)+pos > cap(s.headerKeyBuffer) {
-				return report, true, nil, errors.New("header key is too long")
-			}
-
-			key = append(s.headerKeyBuffer, data[:pos]...)
-		}
-		
-		switch data = trimSuffixSpaces(data[pos+1:]); {
-		case equalfold(key, hostKey):
-			s.state = eHostValue
-			goto hostValue
-		case equalfold(key, contentLengthKey):
-			s.state = eContentLengthValue
-			goto contentLengthValue
-		default:
+	if len(s.headerKeyBuffer) >= len(hostKey) && s.headerKeyBuffer[len(hostKey)-1] == ':' {
+		if !equalfold(s.headerKeyBuffer[:len(hostKey)], hostKey) {
 			s.state = eOtherHeaderValue
 			goto otherHeaderValue
 		}
+
+		data = data[len(hostKey):]
+		s.state = eHostValue
+		goto hostValue
+	} else if len(s.headerKeyBuffer) >= len(contentLengthKey) {
+		if !equalfold(s.headerKeyBuffer, contentLengthKey) {
+			s.state = eOtherHeaderValue
+			goto otherHeaderValue
+		}
+
+		data = data[len(contentLengthKey):]
+		s.state = eContentLengthValue
+		goto contentLengthValue
 	}
+
+	return report, false, nil, nil
 
 headerKeyCR:
 	if len(data) == 0 {
-		return report, false, data, nil
+		return report, false, nil, nil
 	}
 
 	if data[0] != '\n' {
@@ -128,10 +118,11 @@ headerKeyCR:
 otherHeaderValue:
 	pos = bytes.IndexByte(data, '\n')
 	if pos == -1 {
-		return report, false, data[:0], nil
+		return report, false, nil, nil
 	}
 
 	data = data[pos+1:]
+	s.headerKeyBuffer = s.headerKeyBuffer[:0]
 	s.state = eHeaderKey
 	goto headerKey
 
@@ -144,11 +135,11 @@ hostValue:
 
 		s.hostValueBuffer = append(s.hostValueBuffer, data...)
 
-		return report, false, data[:0], nil
+		return report, false, nil, nil
 	}
 
 	{
-		value := data[:pos]
+		value := trimPrefixSpaces(data[:pos])
 		if value[len(value)-1] == '\r' {
 			value = value[:len(value)-1]
 		}
@@ -159,16 +150,21 @@ hostValue:
 
 		s.hostValueBuffer = append(s.hostValueBuffer, value...)
 		data = data[pos+1:]
+		s.headerKeyBuffer = s.headerKeyBuffer[:0]
 		s.state = eHeaderKey
 		goto headerKey
 	}
 
 contentLengthValue:
 	if len(data) == 0 {
-		return report, false, data, nil
+		return report, false, nil, nil
 	}
 
 	for i, char := range data {
+		if char == ' ' {
+			continue
+		}
+
 		if char < '0' || char > '9' {
 			data = data[i:]
 			break
@@ -184,6 +180,7 @@ contentLengthValue:
 		goto contentLengthValueCR
 	case '\n':
 		data = data[1:]
+		s.headerKeyBuffer = s.headerKeyBuffer[:0]
 		s.state = eHeaderKey
 		goto headerKey
 	default:
@@ -192,7 +189,7 @@ contentLengthValue:
 
 contentLengthValueCR:
 	if len(data) == 0 {
-		return report, false, data, nil
+		return report, false, nil, nil
 	}
 
 	if data[0] != '\n' {
@@ -200,24 +197,41 @@ contentLengthValueCR:
 	}
 
 	data = data[1:]
+	s.headerKeyBuffer = s.headerKeyBuffer[:0]
 	s.state = eHeaderKey
 	goto headerKey
 
 requestCompleted:
-	report = scanner.Report{
+	return scan.Report{
 		Receiver:      uf.B2S(s.hostValueBuffer),
 		ContentLength: s.contentLength,
 		IsChunked:     false,
+	}, true, data, nil
+}
+
+func (s *Scanner) Body(data []byte) (endsAt int, err error) {
+	if s.isChunked {
+		return s.chunkedScanner.Parse(data)
 	}
+
+	if len(data) > s.contentLength {
+		return s.contentLength, nil
+	}
+
+	s.contentLength -= len(data)
+
+	return -1, nil
+}
+
+func (s *Scanner) Release() {
+	s.contentLength = 0
 	s.hostValueBuffer = s.hostValueBuffer[:0]
 	s.isChunked = false
 	s.contentLength = 0
 	s.state = eRequestLine
-
-	return report, true, data, nil
 }
 
-func trimSuffixSpaces(b []byte) []byte {
+func trimPrefixSpaces(b []byte) []byte {
 	for i, char := range b {
 		if char != ' ' {
 			return b[i:]

@@ -11,3 +11,11 @@ const (
 	eContentLengthValueCR
 	eOtherHeaderValue
 )
+
+type chunkedState int
+
+const (
+	eChunkLength chunkedState = iota
+	eChunkBody
+	eLastChunk
+)
