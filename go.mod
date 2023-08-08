@@ -1,4 +1,4 @@
-module atmen
+module at
 
 go 1.20
 
