@@ -203,7 +203,7 @@ contentLengthValueCR:
 
 requestCompleted:
 	return scan.Report{
-		Receiver:      uf.B2S(s.hostValueBuffer),
+		Host:          uf.B2S(s.hostValueBuffer),
 		ContentLength: s.contentLength,
 		IsChunked:     false,
 	}, true, data, nil
