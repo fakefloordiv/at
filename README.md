@@ -1,5 +1,5 @@
 # at
-PoC http forwarder. Primarly aims at the performance & lowest possible latency. In order to achieve this, HTTP parser (bottleneck in most cases) is built in honor to maximal performance possible, heavily using SIMD and 
+PoC http forwarder. Primarily aims at the performance & lowest possible latency. In order to achieve this, HTTP parser (bottleneck in most cases) is built in honor to maximal performance possible, heavily using SIMD and
 optimal (hardcoded) way to search desired headers (a very small subset of them - like Host, Content-Length and Transfer-Encoding), resulting in 15+gb/s throughput on my machine (AMD Ryzen 7 5700x, default benchmarks 
 that aren't that precise, to be honest). 
 

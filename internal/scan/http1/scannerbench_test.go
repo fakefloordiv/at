@@ -14,7 +14,7 @@ func BenchmarkScanner(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			_, _, _, _ = scan.Scan(request)
+			_, _, _ = scan.Scan(request)
 			// as we put the whole request at a time, we can avoid checking if it's completed
 			scan.Release()
 		}
@@ -27,7 +27,7 @@ func BenchmarkScanner(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			_, _, _, _ = scan.Scan(request)
+			_, _, _ = scan.Scan(request)
 			scan.Release()
 		}
 	})
@@ -39,7 +39,7 @@ func BenchmarkScanner(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			_, _, _, _ = scan.Scan(request)
+			_, _, _ = scan.Scan(request)
 			scan.Release()
 		}
 	})
@@ -51,7 +51,7 @@ func BenchmarkScanner(b *testing.B) {
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			_, _, _, _ = scan.Scan(request)
+			_, _, _ = scan.Scan(request)
 			scan.Release()
 		}
 	})

@@ -3,11 +3,12 @@ package http1
 import (
 	"at/internal/scan"
 	"bytes"
-	"errors"
 	"github.com/indigo-web/utils/uf"
 )
 
 var (
+	_ scan.Scanner = NewScanner()
+
 	hostKey          = []byte("host:")
 	contentLengthKey = []byte("content-length:")
 	// this variable must hold the value of the LONGEST key, including a colon at the end
@@ -22,6 +23,7 @@ type Scanner struct {
 	state           parserState
 	headerKeyBuffer []byte
 	hostValueBuffer []byte
+	host            string
 	chunkedScanner  *chunkedBodyScanner
 }
 
@@ -33,8 +35,11 @@ func NewScanner() *Scanner {
 	}
 }
 
-func (s *Scanner) Scan(data []byte) (report scan.Report, done bool, rest []byte, err error) {
-	var pos int
+func (s *Scanner) Scan(data []byte) (to string, endsAt int, err error) {
+	var (
+		pos             int
+		originalDataLen = len(data)
+	)
 
 	switch s.state {
 	case eRequestLine:
@@ -49,6 +54,8 @@ func (s *Scanner) Scan(data []byte) (report scan.Report, done bool, rest []byte,
 		goto contentLengthValueCR
 	case eOtherHeaderValue:
 		goto otherHeaderValue
+	case eBody:
+		goto body
 	default:
 		panic("BUG: unknown scan state")
 	}
@@ -56,7 +63,7 @@ func (s *Scanner) Scan(data []byte) (report scan.Report, done bool, rest []byte,
 requestLine:
 	pos = bytes.IndexByte(data, '\n')
 	if pos == -1 {
-		return report, false, nil, nil
+		return "", -1, nil
 	}
 
 	data = data[pos+1:]
@@ -66,7 +73,7 @@ requestLine:
 
 headerKey:
 	if len(data) == 0 {
-		return report, false, nil, nil
+		return s.host, -1, nil
 	}
 
 	switch data[0] {
@@ -75,8 +82,13 @@ headerKey:
 		s.state = eHeaderKeyCR
 		goto headerKeyCR
 	case '\n':
+		if len(s.host) == 0 {
+			return "", -1, ErrNoHost
+		}
+
 		data = data[1:]
-		goto requestCompleted
+		s.state = eBody
+		goto body
 	}
 
 	s.headerKeyBuffer = append(s.headerKeyBuffer, data[:maxKeyLen-len(s.headerKeyBuffer)]...)
@@ -101,24 +113,29 @@ headerKey:
 		goto contentLengthValue
 	}
 
-	return report, false, nil, nil
+	return s.host, -1, nil
 
 headerKeyCR:
 	if len(data) == 0 {
-		return report, false, nil, nil
+		return s.host, -1, nil
 	}
 
 	if data[0] != '\n' {
-		return report, true, nil, errors.New("incomplete CRLF sequence")
+		return "", -1, ErrBadRequest
+	}
+
+	if len(s.hostValueBuffer) == 0 {
+		return "", -1, ErrNoHost
 	}
 
 	data = data[1:]
-	goto requestCompleted
+	s.state = eBody
+	goto body
 
 otherHeaderValue:
 	pos = bytes.IndexByte(data, '\n')
 	if pos == -1 {
-		return report, false, nil, nil
+		return s.host, -1, nil
 	}
 
 	data = data[pos+1:]
@@ -130,12 +147,12 @@ hostValue:
 	pos = bytes.IndexByte(data, '\n')
 	if pos == -1 {
 		if len(s.hostValueBuffer)+len(data) > cap(s.hostValueBuffer) {
-			return report, true, nil, errors.New("host is too long")
+			return "", -1, ErrTooLong
 		}
 
 		s.hostValueBuffer = append(s.hostValueBuffer, data...)
 
-		return report, false, nil, nil
+		return "", -1, nil
 	}
 
 	{
@@ -145,10 +162,11 @@ hostValue:
 		}
 
 		if len(s.hostValueBuffer)+len(value) > cap(s.hostValueBuffer) {
-			return report, true, nil, errors.New("host is too long")
+			return "", -1, ErrTooLong
 		}
 
 		s.hostValueBuffer = append(s.hostValueBuffer, value...)
+		s.host = uf.B2S(s.hostValueBuffer)
 		data = data[pos+1:]
 		s.headerKeyBuffer = s.headerKeyBuffer[:0]
 		s.state = eHeaderKey
@@ -157,7 +175,7 @@ hostValue:
 
 contentLengthValue:
 	if len(data) == 0 {
-		return report, false, nil, nil
+		return s.host, -1, nil
 	}
 
 	for i, char := range data {
@@ -184,16 +202,17 @@ contentLengthValue:
 		s.state = eHeaderKey
 		goto headerKey
 	default:
-		return report, true, nil, errors.New("bad content-length value")
+		// content-length value is invalid in this case
+		return "", -1, ErrBadRequest
 	}
 
 contentLengthValueCR:
 	if len(data) == 0 {
-		return report, false, nil, nil
+		return s.host, -1, nil
 	}
 
 	if data[0] != '\n' {
-		return report, true, nil, errors.New("incomplete CRLF sequence")
+		return "", -1, ErrBadRequest
 	}
 
 	data = data[1:]
@@ -201,33 +220,26 @@ contentLengthValueCR:
 	s.state = eHeaderKey
 	goto headerKey
 
-requestCompleted:
-	return scan.Report{
-		Host:          uf.B2S(s.hostValueBuffer),
-		ContentLength: s.contentLength,
-		IsChunked:     false,
-	}, true, data, nil
-}
-
-func (s *Scanner) Body(data []byte) (endsAt int, err error) {
+body:
 	if s.isChunked {
-		return s.chunkedScanner.Parse(data)
+		endsAt, err = s.chunkedScanner.Parse(data)
+		return s.host, originalDataLen - endsAt, err
 	}
 
-	if len(data) > s.contentLength {
-		return s.contentLength, nil
+	if len(data) >= s.contentLength {
+		return s.host, originalDataLen - len(data) + s.contentLength, nil
 	}
 
 	s.contentLength -= len(data)
 
-	return -1, nil
+	return s.host, -1, nil
 }
 
 func (s *Scanner) Release() {
 	s.contentLength = 0
 	s.hostValueBuffer = s.hostValueBuffer[:0]
+	s.host = ""
 	s.isChunked = false
-	s.contentLength = 0
 	s.state = eRequestLine
 }
 

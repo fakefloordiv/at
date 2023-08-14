@@ -10,6 +10,7 @@ const (
 	eContentLengthValue
 	eContentLengthValueCR
 	eOtherHeaderValue
+	eBody
 )
 
 type chunkedState int

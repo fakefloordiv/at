@@ -4,24 +4,25 @@ import (
 	"at/internal/connect"
 	"at/internal/scan"
 	"at/internal/server/tcp"
-	"fmt"
 	"github.com/indigo-web/utils/arena"
 	"strings"
 )
 
 type Server struct {
-	client        tcp.Client
-	scanner       scan.Scanner
-	connector     *connect.Connector
-	forwardTo     string
-	headersBuffer *arena.Arena[byte]
+	client    tcp.Client
+	scanner   scan.Scanner
+	connector *connect.Connector
+	buffer    *arena.Arena[byte]
 }
 
-func New(client tcp.Client, connector *connect.Connector, headersBuff *arena.Arena[byte]) *Server {
+func New(
+	client tcp.Client, scanner scan.Scanner, connector *connect.Connector, buffer *arena.Arena[byte],
+) *Server {
 	return &Server{
-		client:        client,
-		connector:     connector,
-		headersBuffer: headersBuff,
+		client:    client,
+		scanner:   scanner,
+		connector: connector,
+		buffer:    buffer,
 	}
 }
 
@@ -31,66 +32,110 @@ func (s *Server) Serve() {
 		s.connector.Close()
 	}()
 
-	state := eHeaders
+	var forwardTo string
 
+amass:
 	for {
 		data, err := s.client.Read()
 		if err != nil {
 			return
 		}
 
-		switch state {
-		case eHeaders:
-			report, done, rest, err := s.scanner.Scan(data)
-			if err != nil {
+		host, endsAt, err := s.scanner.Scan(data)
+		if err != nil {
+			return
+		}
+
+		// basically, there are three options now:
+
+		// 1) we received the whole request all at once
+		if endsAt != -1 {
+			if !s.buffer.Append(data[:endsAt]...) {
 				return
 			}
 
-			if !s.headersBuffer.Append(data...) {
-				// in case client exceeds forwarder's buffer size, just drop the connection
+			s.client.Unread(data[endsAt:])
+			if err = s.send(host, s.buffer.Finish()); err != nil {
 				return
 			}
 
-			s.client.Unread(rest)
+			s.buffer.Clear()
+			continue
+		}
 
-			if done {
-				s.forwardTo = stripWWW(report.Host)
-				if err = s.send(s.headersBuffer.Finish()); err != nil {
-					return
-				}
+		// 2) we finally received Host header value, but not the whole request yet
+		if len(host) > 0 {
+			forwardTo = host
+			goto transit
+		}
 
-				if report.ContentLength > 0 || report.IsChunked {
-					state = eBody
-				}
-			}
-		case eBody:
-			endsAt, err := s.scanner.Body(data)
-			if err != nil {
+		// 3) no whole request, no Host, no fun. Just save it and keep going
+		if !s.buffer.Append(data...) {
+			// in case client exceeds forwarder's buffer size, just drop the connection.
+			// There's nothing else we can do in this situation
+			return
+		}
+	}
+
+transit:
+	for {
+		data, err := s.client.Read()
+		if err != nil {
+			return
+		}
+
+		_, endsAt, err := s.scanner.Scan(data)
+		if err != nil {
+			return
+		}
+
+		if endsAt != -1 {
+			if !s.drain(forwardTo, data, endsAt) {
 				return
 			}
 
-			if err = s.send(data); err != nil {
-				return
-			}
+			goto amass
+		}
 
-			if endsAt == -1 {
-				s.client.Unread(data[endsAt:])
-				state = eHeaders
-			}
-		default:
-			panic(fmt.Errorf("BUG: unknown HTTP server state: %d", state))
+		err = s.send(forwardTo, data)
+		if err != nil {
+			return
 		}
 	}
 }
 
-func (s *Server) send(data []byte) (err error) {
-	client := s.connector.Get(s.forwardTo)
-	if client == nil {
-		client, err = s.connector.Connect(s.forwardTo)
+func (s *Server) drain(to string, data []byte, endsAt int) (ok bool) {
+	piece, leftData := data[:endsAt], data[endsAt:]
+	s.client.Unread(leftData)
+	err := s.send(to, piece)
+
+	return err == nil
+}
+
+func (s *Server) send(to string, data []byte) (err error) {
+	to = stripWWW(to)
+	host := s.connector.Get(to)
+	if host == nil {
+		host, err = s.connector.Connect(to)
 		if err != nil {
 			return err
 		}
+
+		go func() {
+			for {
+				data, err := host.Read()
+				if err != nil {
+					return
+				}
+
+				if err := s.client.Write(data); err != nil {
+					return
+				}
+			}
+		}()
 	}
+
+	return host.Write(data)
 }
 
 func stripWWW(domain string) string {
