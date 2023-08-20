@@ -11,6 +11,10 @@ Terms:
 - master-client: user, that connects to the master-server, and sends data to be forwarded
 - proxy-server: server, that receives data from master-server, and forwards it to the proxy-client
 - proxy-client: actual local network application
+- tunnel: pipe between master-client and proxy-client. This pipe looks in the following way:
+  master-client <-> master-server <-> proxy-server <-> proxy-client
+- control stream: the first established connection between master- and proxy-server
+- data stream: master-server -> proxy-server connection for ordinary data transmission
 
 Protocol scheme:
 +--------------+------------------+
@@ -26,45 +30,57 @@ that both participants aren't compulsory to respond to each message (but it usua
 Messages are supposed to be exchanged along exclusive channel, so other data should be
 transmitted by own channels.
 
-Available commands for proxy-server:
+Valid messages to proxy-server:
 - handshake
   - server magic (u64)
 - heartbeat
 - new stream
+- tunnel established
+  - addr (u32)
+  - port (u16)
 - close stream
   - port (u16)
 
-Available responses for master-server:
+Valid messages to master-server:
 - handshake
   - client magic (u64)
 - heartbeat
 - stream established
-  - addr (u32)
   - port (u16)
 
-Master-server starts listening on the 100 port for proxy-servers. When proxy-server establishes
-the connection with master-server by port 100,
+Assume, that master-server starts listening on the port 100 for proxy-servers. When
+proxy-server establishes the connection with master-server by port 100 for the first
+time, the connection is considered as control stream. It makes handshake, and starts
+waiting for commands. When there is a command to open a new stream, second connection
+is established by port 100. Master-server receives a message with a port of a newly
+created connection, that is considered to be a new data stream.
 
-Normal communication looks in the following way:
-- * proxy-server establishes a connection with master-server *
-- master-server->proxy-server: Handshake ServerMagic
-- proxy-server->master-server: Handshake ClientMagic
-- * magic numbers are correct, handshake is completed *
-- master-server->proxy-server: StreamEstablished addr port
+Normal communication between master-server and proxy-server looks in the following way:
+* proxy-server establishes first connection with a master-server *
+- proxy-server -> master-server: Handshake ClientMagic
+- master-server -> proxy-server: Handshake ServerMagic
+* magic numbers are valid, handshake is completed *
+- master-server -> proxy-server: TunnelEstablished addr port
   - where addr, port - a pair of master-server address and port, occupied exclusively by
-    proxy-server
-- * new incoming connection to the master-server *
-- master-server->proxy-server: NewStream
-- * proxy-server establishes new connection to the proxy-client and  *
--
+    proxy-server and used to accept master-clients
+* new incoming master-client to the master-server *
+- master-server -> proxy-server: NewStream
+* proxy-server establishes new connection to both master-server and proxy-client *
+- proxy-server -> master-server: StreamEstablished port
+* data starts transferring through the tunnel *
+if master-client disconnects:
+  - master-server -> proxy-server: CloseStream port
+if proxy-server data stream actively closes:
+  - drop connection also with a master-client
 */
 
 const (
 	Handshake byte = iota + 1
 	Heartbeat
 	NewStream
-	CloseStream
 	StreamEstablished
+	CloseStream
+	TunnelEstablished
 )
 
 const (
@@ -93,9 +109,14 @@ func (m *Message) Send(client tcp.Client, buff []byte) error {
 
 		return client.Write(buff)
 	case StreamEstablished:
-		buff = append(buff, StreamEstablished)
+		buff = append(buff, TunnelEstablished)
 		buff = binary.LittleEndian.AppendUint16(buff, m.Port)
+
+		return client.Write(buff)
+	case TunnelEstablished:
+		buff = append(buff, TunnelEstablished)
 		buff = binary.LittleEndian.AppendUint32(buff, m.Addr)
+		buff = binary.LittleEndian.AppendUint16(buff, m.Port)
 
 		return client.Write(buff)
 	default:
@@ -138,6 +159,15 @@ func (p *Parser) Read() (msg Message, err error) {
 		return msg, nil
 	case NewStream:
 		return msg, nil
+	case StreamEstablished:
+		port, err := p.readN(2)
+		if err != nil {
+			return msg, err
+		}
+
+		msg.Port = binary.LittleEndian.Uint16(port)
+
+		return msg, nil
 	case CloseStream:
 		port, err := p.readN(2)
 		if err != nil {
@@ -147,7 +177,7 @@ func (p *Parser) Read() (msg Message, err error) {
 		msg.Port = binary.LittleEndian.Uint16(port)
 
 		return msg, nil
-	case StreamEstablished:
+	case TunnelEstablished:
 		addr, err := p.readN(4)
 		if err != nil {
 			return msg, err
